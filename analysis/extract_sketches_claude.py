@@ -383,18 +383,47 @@ class SketchProcessor:
                         logger.error(f"Batch {batch_idx} failed: {e}")
                         pbar.update(1)
 
-        # Save final results
+        # Save final results if any remain
         if all_sketches:
             output_file = self.output_dir / "genbank_wgs_sketches.parquet"
             self.save_to_parquet(all_sketches, output_file)
             self.save_unique_hashes(all_sketches,
                                     self.output_dir / "genbank_wgs_unique_hashes.parquet")
 
-        # Merge intermediate files if they exist
+        # Merge intermediate files if they exist (this now also creates unique files)
         self._merge_intermediate_files()
+
+        # If we only used intermediate files and no unique files exist, generate them
+        self._ensure_unique_files_exist()
 
         # Print final statistics
         self._print_statistics()
+
+    def _ensure_unique_files_exist(self):
+        """Ensure unique hash files exist by generating from merged files if needed."""
+        for ksize in [15, 31, 33]:
+            unique_file = self.output_dir / f"genbank_wgs_unique_hashes_k{ksize}.parquet"
+            merged_file = self.output_dir / f"genbank_wgs_sketches_k{ksize}_merged.parquet"
+
+            # If unique file doesn't exist but merged file does, generate it
+            if not unique_file.exists() and merged_file.exists():
+                logger.info(f"Generating unique hash file for k={ksize}")
+                df = pd.read_parquet(merged_file)
+                unique_hashes = df['hash'].unique()
+
+                unique_df = pd.DataFrame({
+                    'hash': np.sort(unique_hashes),
+                    'ksize': ksize
+                })
+
+                table = pa.Table.from_pandas(unique_df)
+                pq.write_table(
+                    table,
+                    unique_file,
+                    compression='snappy'
+                )
+
+                logger.info(f"Generated unique hash file with {len(unique_hashes):,} hashes for k={ksize}")
 
     def _save_intermediate(self, sketches: List[SketchInfo], batch_idx: int):
         """Save intermediate results to avoid memory issues."""
@@ -445,9 +474,23 @@ class SketchProcessor:
 
                 logger.info(f"Merged {len(files)} files for k={ksize}")
 
-                # Calculate unique hashes
-                unique_hashes = merged_df['hash'].nunique()
-                self.stats['unique_hashes_per_k'][ksize] = unique_hashes
+                # Create unique hash file from merged data
+                unique_output = self.output_dir / f"genbank_wgs_unique_hashes_k{ksize}.parquet"
+                unique_hashes = merged_df['hash'].unique()
+                unique_df = pd.DataFrame({
+                    'hash': np.sort(unique_hashes),
+                    'ksize': ksize
+                })
+
+                table = pa.Table.from_pandas(unique_df)
+                pq.write_table(
+                    table,
+                    unique_output,
+                    compression='snappy'
+                )
+
+                logger.info(f"Saved {len(unique_hashes):,} unique hashes for k={ksize} to {unique_output}")
+                self.stats['unique_hashes_per_k'][ksize] = len(unique_hashes)
 
         # Clean up intermediate files
         for file in intermediate_dir.glob("*.parquet"):
