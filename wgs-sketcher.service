@@ -1,0 +1,17 @@
+
+[Unit]
+Description=WGS ➜ sourmash sketcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/wgs_sourmash_pipeline
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/wgs_sourmash_pipeline/.venv/bin/python -m wgs_sketcher --config /opt/wgs_sourmash_pipeline/config.yaml
+Restart=always
+RestartSec=30
+LimitNOFILE=131072
+
+[Install]
+WantedBy=multi-user.target
