@@ -250,7 +250,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
     start = time.time()
     archives = siggz = ok = err = 0
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=args.processes) as ex:
+    with futures.ProcessPoolExecutor(max_workers=args.processes) as ex:
         fn = lambda p: _process_one_sigzip(p, ksizes, spool_dir, args.partition_bits, args.partition_mode)
         for a, s, m_ok, m_err in ex.map(fn, paths, chunksize=8):
             archives += a; siggz += s; ok += m_ok; err += m_err
