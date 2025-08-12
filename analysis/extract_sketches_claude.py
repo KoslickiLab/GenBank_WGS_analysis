@@ -234,6 +234,7 @@ class SketchProcessor:
     def save_to_parquet(self, sketches: List[SketchInfo], output_file: Path):
         """
         Save sketches to a Parquet file optimized for hash analysis.
+        Uses vectorized operations for better performance.
 
         Args:
             sketches: List of SketchInfo objects
@@ -253,33 +254,46 @@ class SketchProcessor:
         for ksize, k_sketches in k_groups.items():
             output_k_file = output_file.parent / f"{output_file.stem}_k{ksize}.parquet"
 
-            # Flatten the data for Parquet storage
-            records = []
-            for sketch in k_sketches:
-                # Store each hash as a separate row for easy counting
-                for hash_val in sketch.hashes:
-                    records.append({
-                        'hash': int(hash_val),
-                        'ksize': ksize,
-                        'scaled': sketch.scaled,
-                        'source_file': sketch.file_path,
-                        'sketch_name': sketch.sketch_name
-                    })
+            logger.info(f"Processing {len(k_sketches)} sketches for k={ksize}")
 
-            if records:
-                df = pd.DataFrame(records)
+            # Use vectorized approach for better performance
+            all_hashes = []
+            all_ksizes = []
+            all_scaled = []
+            all_source_files = []
+            all_sketch_names = []
 
-                # Use Parquet with compression for efficient storage
-                table = pa.Table.from_pandas(df)
-                pq.write_table(
-                    table,
-                    output_k_file,
-                    compression='snappy',
-                    use_dictionary=True,
-                    compression_level=None
-                )
+            for sketch in tqdm(k_sketches, desc=f"Preparing k={ksize}", leave=False):
+                num_hashes = len(sketch.hashes)
+                all_hashes.append(sketch.hashes)
+                all_ksizes.extend([ksize] * num_hashes)
+                all_scaled.extend([sketch.scaled] * num_hashes)
+                all_source_files.extend([sketch.file_path] * num_hashes)
+                all_sketch_names.extend([sketch.sketch_name] * num_hashes)
 
-                logger.info(f"Saved {len(records)} hashes for k={ksize} to {output_k_file}")
+            # Concatenate all hashes
+            all_hashes_array = np.concatenate(all_hashes)
+
+            # Create DataFrame directly from arrays (much faster)
+            df = pd.DataFrame({
+                'hash': all_hashes_array,
+                'ksize': all_ksizes,
+                'scaled': all_scaled,
+                'source_file': all_source_files,
+                'sketch_name': all_sketch_names
+            })
+
+            # Use Parquet with compression for efficient storage
+            table = pa.Table.from_pandas(df)
+            pq.write_table(
+                table,
+                output_k_file,
+                compression='snappy',
+                use_dictionary=True,
+                compression_level=None
+            )
+
+            logger.info(f"Saved {len(df)} hash records for k={ksize} to {output_k_file}")
 
     def save_unique_hashes(self, sketches: List[SketchInfo], output_file: Path):
         """
