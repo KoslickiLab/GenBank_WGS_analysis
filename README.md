@@ -198,7 +198,7 @@ pytest -q
 ## Acknowledgements
 
 - Relies on the NCBI GenBank WGS FTP service and the `sourmash` toolkit.
-- Originally authored by the Koslicki Lab with assistane from ChatGPT 5 Pro. Project version: **1.0.2**.
+- Originally authored by the Koslicki Lab with assistance from ChatGPT 5 Pro. Project version: **1.0.2**.
 - Last updated: **2025-08-12**.
 
 ---
