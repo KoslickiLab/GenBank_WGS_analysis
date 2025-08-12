@@ -4,23 +4,22 @@
 """
 wgs_sketch_union.py
 
-A parallel pipeline to:
+Parallel pipeline to:
   (1) Extract 64-bit FracMinHash values from sourmash .sig.gz files inside .sig.zip archives,
       writing to partitioned on-disk spool files by k-mer size and a partition function over the hash.
   (2) Reduce each partition to exact unique values and write a partitioned Parquet (or NPY) dataset.
   (3) Optionally compute "rhs minus lhs" set-difference counts between two reduced datasets.
+  (4) mk-mock: generate a small synthetic tree of .sig.zip files for testing.
 
-Updates:
-- Partitioning is now robust to `scaled` truncation by default using a SplitMix64 mixer
-  prior to selecting partition bits. This avoids skew when only the smallest hashes are kept.
-- JSON parser handles top-level lists containing sourmash_signature objects with a 'signatures' list.
-- Fault tolerance improved: errors are logged per-archive and per-member; processing continues.
+Notes:
+- Partitioning robust to scaled minhash using SplitMix64 ("mix" mode) or "low" bits.
+- JSON parser supports your exact format: top-level list of objects with 'signatures': [...]
+- Fault tolerance: per-archive and per-member error handling.
 """
 
 from __future__ import annotations
 
 import argparse
-import concurrent.futures as futures
 import gzip
 import json
 import logging
@@ -30,6 +29,8 @@ import sys
 import time
 import zipfile
 from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from itertools import repeat
+from concurrent.futures import ProcessPoolExecutor
 
 # Optional faster JSON
 try:
@@ -250,9 +251,17 @@ def cmd_extract(args: argparse.Namespace) -> None:
     start = time.time()
     archives = siggz = ok = err = 0
 
-    with futures.ProcessPoolExecutor(max_workers=args.processes) as ex:
-        fn = lambda p: _process_one_sigzip(p, ksizes, spool_dir, args.partition_bits, args.partition_mode)
-        for a, s, m_ok, m_err in ex.map(fn, paths, chunksize=8):
+    # No lambda/closure: pass constants via itertools.repeat(...)
+    with ProcessPoolExecutor(max_workers=args.processes) as ex:
+        for a, s, m_ok, m_err in ex.map(
+            _process_one_sigzip,
+            paths,
+            repeat(ksizes),
+            repeat(spool_dir),
+            repeat(args.partition_bits),
+            repeat(args.partition_mode),
+            chunksize=8
+        ):
             archives += a; siggz += s; ok += m_ok; err += m_err
             if archives % 1000 == 0:
                 elapsed = time.time() - start
@@ -338,6 +347,11 @@ def _reduce_one_partition(spool_dir: Path,
     return int(uniq.size)
 
 
+def _reduce_task(spool_dir: Path, out_dir: Path, k: int, part_hex: str, fmt: str, mem_limit_gb: float):
+    n = _reduce_one_partition(spool_dir, out_dir, k, part_hex, fmt, mem_limit_gb)
+    return (k, part_hex, n)
+
+
 def cmd_reduce(args: argparse.Namespace) -> None:
     spool_dir = Path(args.spool).resolve()
     out_dir = Path(args.out).resolve()
@@ -375,33 +389,37 @@ def cmd_reduce(args: argparse.Namespace) -> None:
         "total_distinct": 0
     }
 
+    # Build task list
+    tasks: List[Tuple[int, str]] = []
     for k in ksizes:
         parts = sorted(d for d in (spool_dir / f"ksize={k}").glob("part=*") if d.is_dir())
-        counts = 0
-        written_parts = 0
         for pdir in parts:
-            part_hex = pdir.name.split("=")[1]
-            try:
-                n = _reduce_one_partition(
-                    spool_dir=spool_dir,
-                    out_dir=out_dir,
-                    k=k,
-                    part_hex=part_hex,
-                    fmt=fmt,
-                    mem_limit_gb=args.mem_limit_gb
-                )
-                counts += n
-                written_parts += 1
-            except MemoryError as me:
-                logging.error(str(me))
-                sys.exit(3)
+            tasks.append((k, pdir.name.split("=")[1]))
 
+    counts_by_k: Dict[int, int] = {k: 0 for k in ksizes}
+    written_by_k: Dict[int, int] = {k: 0 for k in ksizes}
+
+    with ProcessPoolExecutor(max_workers=args.processes) as ex:
+        for k, part_hex, n in ex.map(
+            _reduce_task,
+            repeat(spool_dir),
+            repeat(out_dir),
+            (t[0] for t in tasks),
+            (t[1] for t in tasks),
+            repeat(fmt),
+            repeat(args.mem_limit_gb),
+            chunksize=8
+        ):
+            counts_by_k[k] += n
+            written_by_k[k] += 1
+
+    for k in ksizes:
         manifest["ksizes"][str(k)] = {
-            "partitions": written_parts,
-            "distinct_count": counts
+            "partitions": written_by_k[k],
+            "distinct_count": counts_by_k[k]
         }
-        manifest["total_distinct"] += counts
-        logging.info(f"k={k}: distinct={counts:,} across {written_parts} partitions")
+        manifest["total_distinct"] += counts_by_k[k]
+        logging.info(f"k={k}: distinct={counts_by_k[k]:,} across {written_by_k[k]} partitions")
 
     with open(out_dir / "_MANIFEST.json", "w") as f:
         json.dump(manifest, f, indent=2)
@@ -501,6 +519,82 @@ def cmd_diff(args: argparse.Namespace) -> None:
 
 
 # -----------------------
+# MOCK DATA (for testing)
+# -----------------------
+
+def _mk_mock_one_sig_json(ksize: int, scaled: int, n_hashes: int, rng: np.random.Generator, seed: int = 42) -> dict:
+    # emulate "scaled": keep values below ~2^64 / scaled
+    # using ceil for a conservative upper bound
+    max_hash = int((1 << 64) / scaled)
+    vals = rng.integers(low=0, high=max_hash, size=n_hashes, dtype=np.uint64)
+    vals = np.unique(vals).tolist()
+    return {
+        "num": 0,
+        "ksize": int(ksize),
+        "seed": seed,
+        "max_hash": max_hash,
+        "mins": vals,
+        "md5sum": f"deadbeef{ksize}",
+        "molecule": "DNA"
+    }
+
+
+def cmd_mk_mock(args: argparse.Namespace) -> None:
+    """
+    Create a small tree of mock .sig.zip archives with:
+      - top-level list
+      - each element has 'signatures': [ {ksize=k, mins=[...]} ]
+      - one .sig.gz per k inside signatures/ folder
+    """
+    out = Path(args.out).resolve()
+    _ensure_dir(out)
+    rng = np.random.default_rng(args.seed)
+
+    # Put files in a couple of subdirs to mimic your layout
+    subdirs = ["AAA", "AAB", "AAC"]
+    for sd in subdirs:
+        _ensure_dir(out / sd)
+
+    archives = args.archives
+    members = args.members
+    ksizes = args.ksizes
+    scaled = args.scaled
+
+    for i in range(archives):
+        sd = subdirs[i % len(subdirs)]
+        zip_name = f"wgs.MOCK{i:06d}.1.fsa_nt.gz.sig.zip"
+        zpath = out / sd / zip_name
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            zf.writestr("SOURMASH-MANIFEST.csv", "not,used,here\n")
+            for m in range(members):
+                for k in ksizes:
+                    # Build JSON as a top-level list with one object containing 'signatures': [...]
+                    sig = _mk_mock_one_sig_json(k, scaled, n_hashes=200 + (i + m + k) % 50, rng=rng)
+                    record = [{
+                        "class": "sourmash_signature",
+                        "email": "",
+                        "hash_function": "0.murmur64",
+                        "filename": f"/mock/{sd}/{zip_name}",
+                        "license": "CC0",
+                        "signatures": [sig],
+                        "version": 0.4
+                    }]
+                    raw = (fastjson.dumps(record) if fastjson else json.dumps(record).encode("utf-8"))
+
+                    # gzip-compress into memory
+                    import io as _io
+                    buf = _io.BytesIO()
+                    with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+                        gz.write(raw)
+                    gz_bytes = buf.getvalue()
+
+                    # one .sig.gz per k; name resembles md5
+                    zf.writestr(f"signatures/{sig['md5sum']}.{m}.{k}.sig.gz", gz_bytes)
+
+    logging.info(f"Mock data created at {out} ({archives} zip archives)")
+
+
+# -----------------------
 # CLI
 # -----------------------
 
@@ -529,6 +623,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--ksizes", type=int, nargs="*", help="Optionally restrict to these ksizes.")
     pr.add_argument("--partition-mode", default="mix", choices=["mix", "low", "high"],
                     help="Echoed into manifest for later compatibility checks.")
+    pr.add_argument("--processes", type=int, default=os.cpu_count() or 8,
+                    help="Parallel processes for reduce (per partition).")
     pr.set_defaults(func=cmd_reduce)
 
     pdiff = sub.add_parser("diff", help="Compute counts of hashes in RHS not in LHS (both reduced datasets).")
@@ -539,6 +635,15 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Also write per-partition difference dataset (default no).")
     pdiff.add_argument("--ksizes", type=int, nargs="*", help="Optionally restrict to these ksizes.")
     pdiff.set_defaults(func=cmd_diff)
+
+    pmock = sub.add_parser("mk-mock", help="Create a small synthetic dataset of .sig.zip files for testing.")
+    pmock.add_argument("--out", required=True, help="Directory to create with mock data.")
+    pmock.add_argument("--archives", type=int, default=20, help="Number of .sig.zip to create.")
+    pmock.add_argument("--members", type=int, default=2, help="Number of .sig.gz members per archive.")
+    pmock.add_argument("--ksizes", type=int, nargs="*", default=[15,31,33])
+    pmock.add_argument("--scaled", type=int, default=1000, help="Scaled denominator to emulate.")
+    pmock.add_argument("--seed", type=int, default=42)
+    pmock.set_defaults(func=cmd_mk_mock)
 
     p.add_argument("--log-level", default="INFO")
     return p
