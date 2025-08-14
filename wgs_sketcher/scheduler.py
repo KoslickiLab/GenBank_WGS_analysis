@@ -53,6 +53,7 @@ class Sketcher:
                 continue
             idle_cycles = 0
             file_id, subdir, filename, url = claim
+            LOG.debug("Claimed id=%s subdir=%s file=%s", file_id, subdir, filename)
 
             rel_dir = subdir or shard_subdir_for(filename)
             local_tmp = os.path.join(tmp_root, rel_dir, filename)
