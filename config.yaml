@@ -12,6 +12,8 @@ max_concurrent_downloads: 8
 max_total_workers: 96
 rate_limit_bytes_per_sec: null
 user_agent: "WGS Sketcher/1.0 (+dmk333@psu.edu; admin=dmk333@psu.edu)"
+error_retry_cooldown_seconds: 1800   # only revisit ERROR rows after 30 min
+error_max_total_tries: 20            # cap across the entire lifetime
 stale_seconds: 3600
 
 sourmash_params: "k=15,k=31,k=33,scaled=1000,noabund"

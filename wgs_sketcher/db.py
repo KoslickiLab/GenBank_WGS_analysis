@@ -41,33 +41,48 @@ class DB:
                     self.conn.execute(stmt)
 
     # --- add to wgs_sketcher/db.py (class DB) ---
-    def claim_next(self):
-        """
-        Atomically claim the next PENDING/ERROR row by moving it to DOWNLOADING.
-        Returns tuple (id, subdir, filename, url) or None if no work remains.
-        """
-        import time
-        ts = time.time()
+    def claim_next(self,
+                   error_cooldown_seconds: int = 3600,
+                   error_max_total_tries: int = 20) -> Optional[Tuple[int, str, str, str]]:
+        """Atomically claim work: PENDING first; else eligible ERROR (aged & below cap)."""
+        now = time.time()
+        cutoff = now - error_cooldown_seconds
         with self._lock, self.conn:
+            # 1) Prefer PENDING
             row = self.conn.execute(
-                "SELECT id FROM files WHERE status IN ('PENDING','ERROR') "
-                "ORDER BY id LIMIT 1"
+                "SELECT id FROM files WHERE status='PENDING' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if row:
+                fid = row[0]
+                cur = self.conn.execute(
+                    "UPDATE files SET status='DOWNLOADING', updated_at=? "
+                    "WHERE id=? AND status='PENDING'", (now, fid)
+                )
+                if cur.rowcount == 1:
+                    return self.conn.execute(
+                        "SELECT id, subdir, filename, url FROM files WHERE id=?", (fid,)
+                    ).fetchone()
+                # lost a race; fall through to try again next call
+
+            # 2) Otherwise, an ERROR that has cooled down and hasn't exceeded cap
+            row = self.conn.execute(
+                "SELECT id FROM files "
+                "WHERE status='ERROR' AND tries < ? AND (updated_at IS NULL OR updated_at <= ?) "
+                "ORDER BY updated_at NULLS FIRST, id LIMIT 1",
+                (error_max_total_tries, cutoff)
             ).fetchone()
             if not row:
                 return None
             fid = row[0]
             cur = self.conn.execute(
                 "UPDATE files SET status='DOWNLOADING', updated_at=? "
-                "WHERE id=? AND status IN ('PENDING','ERROR')",
-                (ts, fid),
+                "WHERE id=? AND status='ERROR'", (now, fid)
             )
-            if cur.rowcount == 0:
-                return None  # someone else got it
-            id_, subdir, filename, url = self.conn.execute(
-                "SELECT id, subdir, filename, url FROM files WHERE id=?",
-                (fid,),
+            if cur.rowcount != 1:
+                return None
+            return self.conn.execute(
+                "SELECT id, subdir, filename, url FROM files WHERE id=?", (fid,)
             ).fetchone()
-            return id_, subdir, filename, url
 
     def reset_stuck(self, stale_seconds: int = 3600):
         """
