@@ -35,7 +35,12 @@ class Sketcher:
         timeout = int(self.cfg.get("request_timeout_seconds", 3600))
 
         while not self.stop_flag:
-            claim = self.db.claim_next()
+            try:
+                claim = self.db.claim_next()
+            except Exception as e:
+                LOG.error("Error claiming next file: %s", e)
+                await asyncio.sleep(2.0)
+                continue
             if not claim:
                 await asyncio.sleep(2.0)
                 continue
@@ -103,6 +108,9 @@ class Sketcher:
         async with aiohttp.ClientSession(connector=conn, timeout=timeout, headers=headers) as session:
             total_workers = int(self.cfg.get("max_total_workers", 96))
             workers = [asyncio.create_task(self.worker(session, net_sem, rate)) for _ in range(total_workers)]
+            # Log worker crashes immediately
+            for w in workers:
+                w.add_done_callback(lambda t: LOG.exception("Worker crashed: %r", t.exception()) if t.exception() else None)
 
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):
