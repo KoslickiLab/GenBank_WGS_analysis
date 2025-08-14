@@ -184,6 +184,14 @@ There are basic tests for path sharding and filename selection:
 pip install pytest
 pytest -q
 ```
+---
+
+## Analysis
+
+There are two main steps to the analysis:
+
+1. Read all the `*.sig.zip` files and organize them into sharded parquet files (`wgs_sketch_union_ChatGPT.py`)
+2. Import this into a DuckDB database for comparison against Logan (`save_to_duckdb.py`)
 
 ---
 
@@ -191,7 +199,7 @@ pytest -q
 
 - Python 3.9+
 - [`sourmash`](https://sourmash.readthedocs.io/) available on `PATH`
-- Python packages: `aiohttp`, `PyYAML` (installed via `requirements.txt`)
+- Python packages: `aiohttp`, `PyYAML`, etc. (installed via `requirements.txt`)
 
 ---
 
