@@ -33,6 +33,8 @@ from itertools import repeat
 from concurrent.futures import ProcessPoolExecutor
 import itertools
 import concurrent.futures
+import atexit
+from collections import OrderedDict
 
 # Optional faster JSON
 try:
@@ -179,11 +181,56 @@ def _pid_tag() -> str:
 # EXTRACT stage
 # -----------------------
 
+class _SpoolFDCache:
+    """Per-worker cache of open files + memoized directories."""
+    def __init__(self, spool_dir: Path, max_open: int = 512):
+        self.spool_dir = spool_dir
+        self.max_open = max_open
+        self._fds = OrderedDict()         # key=(k, part_hex) -> file object
+        self._dirs_done = set()           # Path objects already created
+
+    def _ensure_dir(self, d: Path):
+        if d not in self._dirs_done:
+            d.mkdir(parents=True, exist_ok=True)
+            self._dirs_done.add(d)
+
+    def get(self, k: int, part_hex: str):
+        key = (k, part_hex)
+        f = self._fds.pop(key, None)
+        if f is None:
+            part_dir = self.spool_dir / f"ksize={k}" / f"part={part_hex}"
+            self._ensure_dir(part_dir)
+            # Larger Python-level buffer reduces syscalls; OS will still buffer writes.
+            f = open(part_dir / f"{_pid_tag()}.bin", "ab", buffering=1 << 20)
+        # Push to MRU position
+        self._fds[key] = f
+        if len(self._fds) > self.max_open:
+            old_key, old_f = self._fds.popitem(last=False)
+            try: old_f.close()
+            except: pass
+        return f
+
+    def close_all(self):
+        for f in self._fds.values():
+            try: f.close()
+            except: pass
+        self._fds.clear()
+
+_FD_CACHE = None
+def _get_fd_cache(spool_dir: Path, max_open: int):
+    global _FD_CACHE
+    if _FD_CACHE is None:
+        _FD_CACHE = _SpoolFDCache(spool_dir, max_open)
+        atexit.register(_FD_CACHE.close_all)
+    return _FD_CACHE
+
+
 def _process_one_sigzip(path: Path,
                         ksizes: Set[int],
                         spool_dir: Path,
                         partition_bits: int,
-                        partition_mode: str) -> Tuple[int, int, int, int]:
+                        partition_mode: str,
+                        open_files_per_worker: int) -> Tuple[int, int, int, int]:
     """
     Stream a .sig.zip, harvest hashes for given ksizes, and append to spool files.
     Returns: (archives_seen, siggz_seen, members_ok, members_err).
@@ -217,14 +264,14 @@ def _process_one_sigzip(path: Path,
                         uniq_parts, idx = np.unique(parts_sorted, return_index=True)
                         idx = list(idx) + [arr_sorted.size]
                         k_dir = spool_dir / f"ksize={k}"
+                        fdcache = _get_fd_cache(spool_dir, open_files_per_worker)
                         for i, pid_ in enumerate(uniq_parts):
-                            start, end = idx[i], idx[i+1]
+                            start, end = idx[i], idx[i + 1]
                             chunk = arr_sorted[start:end]
                             p_hex = format(int(pid_), f"0{_hex_width(partition_bits)}x")
-                            part_dir = k_dir / f"part={p_hex}"
-                            _ensure_dir(part_dir)
-                            with open(part_dir / f"{_pid_tag()}.bin", "ab") as f:
-                                chunk.tofile(f)
+                            f = fdcache.get(k, p_hex)
+                            # one large write, no reopen, no remkdir
+                            chunk.tofile(f)
                     members_ok += 1
                 except (OSError, gzip.BadGzipFile, json.JSONDecodeError, UnicodeDecodeError) as e:
                     logging.warning(f"Skipping bad member in {path}: {name} ({e})")
@@ -270,11 +317,9 @@ def cmd_extract(args: argparse.Namespace) -> None:
     with Executor(max_workers=args.processes) as ex:
         # Prime the pump
         for path in itertools.islice(path_iter, max_in_flight):
-            in_flight.add(ex.submit(
-                _process_one_sigzip,
-                path, ksizes, spool_dir,
-                args.partition_bits, args.partition_mode
-            ))
+            in_flight.add(ex.submit(_process_one_sigzip, path, ksizes, spool_dir,
+          args.partition_bits, args.partition_mode, args.open_files_per_worker)
+)
 
         while in_flight:
             done, in_flight = concurrent.futures.wait(
@@ -650,6 +695,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--ksizes", type=int, nargs="*", default=[15,31,33], help="k-mer sizes to include.")
     pe.add_argument("--max-in-flight", type=int, default=None,
                     help="Max tasks in flight (default: 4×processes).")
+    pe.add_argument("--open-files-per-worker", type=int, default=512,
+                    help="Max spool files kept open per worker (default 512).")
     pe.set_defaults(func=cmd_extract)
 
     pr = sub.add_parser("reduce", help="Reduce spool partitions to unique and write Parquet or NPY dataset.")
