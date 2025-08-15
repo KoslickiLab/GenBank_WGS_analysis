@@ -34,12 +34,26 @@ class Sketcher:
         retry_max = int(self.cfg.get("max_retries", 6))
         timeout = int(self.cfg.get("request_timeout_seconds", 3600))
 
+        error_cooldown = int(self.cfg.get("error_retry_cooldown_seconds", 1800))
+        error_max_total = int(self.cfg.get("error_max_total_tries", 20))
+        idle_cycles = 0
         while not self.stop_flag:
-            claim = self.db.claim_next()
-            if not claim:
+            try:
+                claim = self.db.claim_next(error_cooldown, error_max_total)
+            except Exception as e:
+                LOG.exception("DB error while claiming work: %r", e)
                 await asyncio.sleep(2.0)
                 continue
+            if not claim:
+                idle_cycles += 1
+                if idle_cycles % 30 == 0:
+                    st = self.db.stats()
+                    LOG.info("No claimable work yet. by_status=%s", st.get("by_status"))
+                await asyncio.sleep(2.0)
+                continue
+            idle_cycles = 0
             file_id, subdir, filename, url = claim
+            LOG.debug("Claimed id=%s subdir=%s file=%s", file_id, subdir, filename)
 
             rel_dir = subdir or shard_subdir_for(filename)
             local_tmp = os.path.join(tmp_root, rel_dir, filename)
@@ -103,6 +117,9 @@ class Sketcher:
         async with aiohttp.ClientSession(connector=conn, timeout=timeout, headers=headers) as session:
             total_workers = int(self.cfg.get("max_total_workers", 96))
             workers = [asyncio.create_task(self.worker(session, net_sem, rate)) for _ in range(total_workers)]
+            # Log worker crashes immediately
+            for w in workers:
+                w.add_done_callback(lambda t: LOG.exception("Worker crashed: %r", t.exception()) if t.exception() else None)
 
             loop = asyncio.get_running_loop()
             for sig in (signal.SIGINT, signal.SIGTERM):

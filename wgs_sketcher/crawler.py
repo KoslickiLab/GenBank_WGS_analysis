@@ -6,7 +6,7 @@ from typing import List, Tuple, Optional
 from .utils import LOG, is_target_file
 
 LISTING_HREF_RE = re.compile(r'href="([^"]+)"', re.IGNORECASE)
-SUBDIR_RE = re.compile(r'^[A-Z0-9]{3}/$')  # e.g., AAS/
+SUBDIR_RE = re.compile(r'^(?:[A-Z]/|[A-Z0-9]{3}/)$')  # A/ or AAA/
 
 async def fetch_text(session: aiohttp.ClientSession, url: str, timeout: int=120) -> Optional[str]:
     try:

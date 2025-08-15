@@ -1,2 +1,4 @@
 aiohttp>=3.9
 PyYAML>=6.0
+pyarrow
+orjson
