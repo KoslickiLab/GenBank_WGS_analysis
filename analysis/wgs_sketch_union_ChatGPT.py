@@ -31,6 +31,8 @@ import zipfile
 from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from itertools import repeat
 from concurrent.futures import ProcessPoolExecutor
+import itertools
+import concurrent.futures
 
 # Optional faster JSON
 try:
@@ -245,32 +247,65 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
     ksizes = set(args.ksizes) if args.ksizes else {15, 31, 33}
 
-    paths = list(_iter_sigzip_files(root))
-    logging.info(f"Found {len(paths):,} .sig.zip files under {root}")
+    # Stream discovery; do NOT materialize 2M+ paths.
+    path_iter = _iter_sigzip_files(root)
+    logging.info("Scanning for .sig.zip under %s (streaming)...", root)
 
     start = time.time()
     archives = siggz = ok = err = 0
 
-    # No lambda/closure: pass constants via itertools.repeat(...)
-    with ProcessPoolExecutor(max_workers=args.processes) as ex:
-        for a, s, m_ok, m_err in ex.map(
-            _process_one_sigzip,
-            paths,
-            repeat(ksizes),
-            repeat(spool_dir),
-            repeat(args.partition_bits),
-            repeat(args.partition_mode),
-            chunksize=8
-        ):
-            archives += a; siggz += s; ok += m_ok; err += m_err
-            if archives % 1000 == 0:
-                elapsed = time.time() - start
-                logging.info(f"Processed {archives:,} zips / {siggz:,} sig.gz; "
-                             f"members ok={ok:,}, bad={err:,} in {elapsed:,.1f}s")
+    # Bounded, out-of-order execution avoids head-of-line blocking
+    max_in_flight = getattr(args, "max_in_flight", None) or (args.processes * 4)
+    in_flight = set()
+
+    # Use a safer start method if available (avoids forking a huge object graph)
+    ctx = None
+    try:
+        import multiprocessing as _mp
+        ctx = _mp.get_context("forkserver")
+    except Exception:
+        ctx = None
+
+    Executor = (lambda **kw: ProcessPoolExecutor(mp_context=ctx, **kw)) if ctx else ProcessPoolExecutor
+    with Executor(max_workers=args.processes) as ex:
+        # Prime the pump
+        for path in itertools.islice(path_iter, max_in_flight):
+            in_flight.add(ex.submit(
+                _process_one_sigzip,
+                path, ksizes, spool_dir,
+                args.partition_bits, args.partition_mode
+            ))
+
+        while in_flight:
+            done, in_flight = concurrent.futures.wait(
+                in_flight, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for fut in done:
+                a, s, m_ok, m_err = fut.result()
+                archives += a; siggz += s; ok += m_ok; err += m_err
+
+                # Refill to keep a bounded number of tasks in flight
+                try:
+                    next_path = next(path_iter)
+                    in_flight.add(ex.submit(
+                        _process_one_sigzip,
+                        next_path, ksizes, spool_dir,
+                        args.partition_bits, args.partition_mode
+                    ))
+                except StopIteration:
+                    pass
+
+                if archives % 1000 == 0:
+                    elapsed = time.time() - start
+                    logging.info(
+                        "Processed %s zips / %s sig.gz; members ok=%s bad=%s in %.1fs",
+                        f"{archives:,}", f"{siggz:,}", f"{ok:,}", f"{err:,}", elapsed
+                    )
 
     logging.info("DONE extract: processed %s zips, %s sig.gz; members ok=%s bad=%s",
                  f"{archives:,}", f"{siggz:,}", f"{ok:,}", f"{err:,}")
-    logging.info(f"SPOOL at {spool_dir}")
+    logging.info("SPOOL at %s", spool_dir)
+
 
 
 # -----------------------
@@ -613,6 +648,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pe.add_argument("--partition-mode", default="mix", choices=["mix", "low", "high"],
                     help="Partition function over 64-bit hashes. Default 'mix' uses SplitMix64+top-bits (robust with scaled).")
     pe.add_argument("--ksizes", type=int, nargs="*", default=[15,31,33], help="k-mer sizes to include.")
+    pe.add_argument("--max-in-flight", type=int, default=None,
+                    help="Max tasks in flight (default: 4×processes).")
     pe.set_defaults(func=cmd_extract)
 
     pr = sub.add_parser("reduce", help="Reduce spool partitions to unique and write Parquet or NPY dataset.")
