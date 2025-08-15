@@ -335,8 +335,10 @@ def cmd_extract(args: argparse.Namespace) -> None:
                     in_flight.add(ex.submit(
                         _process_one_sigzip,
                         next_path, ksizes, spool_dir,
-                        args.partition_bits, args.partition_mode
+                        args.partition_bits, args.partition_mode,
+                        args.open_files_per_worker,  # ← add this
                     ))
+
                 except StopIteration:
                     pass
 
