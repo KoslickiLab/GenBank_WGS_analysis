@@ -44,6 +44,7 @@ python -m wgs_sketcher --config config.yaml
 ```
 
 > **Tip**: This is an async pipeline. Throughput depends on your network, disk, and the concurrency parameters you choose.
+> **Another Tip**: when running `/mnt/ramdisk/wgs_sketch_union_ChatGPT.py` put both the input and the output on a RAMdisk. There is a TON of IO in that.
 
 ---
 
