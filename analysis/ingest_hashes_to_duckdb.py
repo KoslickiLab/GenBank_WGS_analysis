@@ -78,7 +78,7 @@ def _ensure_meta_tables(con: duckdb.DuckDBPyConnection, schema: str) -> None:
             dataset_root   TEXT,
             ksize          SMALLINT,
             table_name     TEXT,
-            rows_ingested  UINTEGER
+            rows_ingested  UBIGINT
         )
     """)
 
