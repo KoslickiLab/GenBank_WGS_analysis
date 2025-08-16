@@ -38,7 +38,7 @@ def main():
         GROUP BY bucket, hash
       ) TO '{out1}'
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT TRUE);
+       ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT FALSE);
     """)
 
     con.execute(f"""
@@ -49,7 +49,7 @@ def main():
         GROUP BY bucket, hash
       ) TO '{out2}'
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 4000000);
+       ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT FALSE);
     """)
 
     # Phase 2: counts (unchanged)
