@@ -10,7 +10,7 @@ out1 = "/scratch/wgs_logan_diff/parquet/minhash31_db1"
 out2 = "/scratch/wgs_logan_diff/parquet/minhash31_db2"
 tmp  = "/scratch/wgs_logan_diff/duckdb_tmp"
 
-B = 10
+B = 9
 mask = (1 << B) - 1
 
 def main():
@@ -38,7 +38,7 @@ def main():
         GROUP BY bucket, hash
       ) TO '{out1}'
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 4000000);
+       ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT TRUE);
     """)
 
     con.execute(f"""
