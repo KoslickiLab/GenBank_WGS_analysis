@@ -1,14 +1,14 @@
-# file: minhash_diff.py
+# file: diff_bet_wgs_and_logan.py
 import duckdb, json, time, pathlib, sys
 
-LOG_TXT = "/scratch/minhash_diff_report.txt"
-LOG_JSON = "/scratch/minhash_diff_report.json"
+LOG_TXT = "/scratch/wgs_logan_diff/minhash_diff_report.txt"
+LOG_JSON = "/scratch/wgs_logan_diff/minhash_diff_report.json"
 
 db1_path = "/scratch/shared_data_new/Logan_yacht_data/processed_data/database_all.db"
 db2_path = "/scratch/dmk333_new/GenBank_WGS_analysis/analysis/wgs_database.db"
-out1 = "/scratch/parquet/minhash31_db1"
-out2 = "/scratch/parquet/minhash31_db2"
-tmp  = "/scratch/duckdb_tmp"
+out1 = "/scratch/wgs_logan_diff/parquet/minhash31_db1"
+out2 = "/scratch/wgs_logan_diff/parquet/minhash31_db2"
+tmp  = "/scratch/wgs_logan_diff/duckdb_tmp"
 
 B = 10
 mask = (1 << B) - 1
@@ -21,12 +21,14 @@ def main():
     con.execute(f"SET temp_directory='{tmp}/'")
     con.execute("PRAGMA enable_object_cache")
     con.execute("PRAGMA enable_progress_bar")
+    # Helpful for large exports/writes
+    con.execute("SET preserve_insertion_order=false")
 
     con.execute(f"ATTACH '{db1_path}' AS db1 (READ_ONLY)")
     con.execute(f"ATTACH '{db2_path}' AS db2 (READ_ONLY)")
     con.execute(f"CREATE OR REPLACE TEMP TABLE _params AS SELECT {B}::INTEGER AS B, {mask}::BIGINT AS mask")
 
-    # Phase 1: exports (DISTINCT per bucket)
+    # Phase 1: exports (DISTINCT per bucket) -- no PER_THREAD_OUTPUT here
     con.execute(f"""
       COPY (
         SELECT (min_hash & (SELECT mask FROM _params)) AS bucket,
@@ -36,7 +38,7 @@ def main():
         GROUP BY bucket, hash
       ) TO '{out1}'
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
-       PER_THREAD_OUTPUT, ROW_GROUP_SIZE 4000000);
+       ROW_GROUP_SIZE 4000000);
     """)
 
     con.execute(f"""
@@ -47,17 +49,19 @@ def main():
         GROUP BY bucket, hash
       ) TO '{out2}'
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
-       PER_THREAD_OUTPUT, ROW_GROUP_SIZE 4000000);
+       ROW_GROUP_SIZE 4000000);
     """)
 
-    # Phase 2: counts
+    # Phase 2: counts (unchanged)
     a_not_b, b_not_a = con.execute("""
       WITH
       db1u AS (
-        SELECT bucket, hash FROM read_parquet($p1, hive_partitioning=true)
+        SELECT bucket, hash
+        FROM read_parquet($p1, hive_partitioning=true)
       ),
       db2u AS (
-        SELECT bucket, hash FROM read_parquet($p2, hive_partitioning=true)
+        SELECT bucket, hash
+        FROM read_parquet($p2, hive_partitioning=true)
       ),
       a_not_b_by_bucket AS (
         SELECT bucket, COUNT(*) AS cnt
@@ -79,6 +83,7 @@ def main():
 
     elapsed = time.time() - t0
     report = {
+        "duckdb_version": con.execute("PRAGMA version").fetchone()[0],
         "bucket_bits": B,
         "mask": mask,
         "a_not_b": int(a_not_b),
@@ -87,7 +92,11 @@ def main():
         "tmp": tmp,
         "elapsed_sec": elapsed,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "duckdb_version": con.execute("PRAGMA version").fetchone()[0],
+        "settings": {
+            "threads": con.execute("SELECT current_setting('threads')").fetchone()[0],
+            "memory_limit": con.execute("SELECT current_setting('memory_limit')").fetchone()[0],
+            "preserve_insertion_order": con.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0],
+        }
     }
 
     txt = (
@@ -100,6 +109,8 @@ def main():
         f"out1: {out1}\nout2: {out2}\n"
         f"tmp:  {tmp}\n"
         f"DuckDB: {report['duckdb_version']}\n"
+        f"threads={report['settings']['threads']}, memory_limit={report['settings']['memory_limit']}, "
+        f"preserve_insertion_order={report['settings']['preserve_insertion_order']}\n"
     )
     pathlib.Path(LOG_TXT).write_text(txt)
     pathlib.Path(LOG_JSON).write_text(json.dumps(report, indent=2))
