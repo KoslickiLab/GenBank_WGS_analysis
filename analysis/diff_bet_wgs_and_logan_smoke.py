@@ -17,8 +17,8 @@ B = 9
 mask = (1 << B) - 1
 
 # Smoke limits (override via env if desired)
-SMOKE_LIMIT_DB1 = int(os.getenv("SMOKE_LIMIT_DB1", "2000000"))  # 2M rows
-SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000"))
+SMOKE_LIMIT_DB1 = int(os.getenv("SMOKE_LIMIT_DB1", "2000000000"))
+SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000000"))
 
 MONITOR_INTERVAL_SEC = 30
 
