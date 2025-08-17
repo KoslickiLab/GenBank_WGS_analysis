@@ -29,6 +29,8 @@ def main():
     con.execute(f"CREATE OR REPLACE TEMP TABLE _params AS SELECT {B}::INTEGER AS B, {mask}::BIGINT AS mask")
 
     # Phase 1: exports (DISTINCT per bucket) -- no PER_THREAD_OUTPUT here
+    print("Exporting signatures and hashes to Parquet...")
+    print("Working with db1:", db1_path)
     con.execute(f"""
       COPY (
         SELECT (min_hash & (SELECT mask FROM _params)) AS bucket,
@@ -41,6 +43,7 @@ def main():
        ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT FALSE);
     """)
 
+    print("Working with db2:", db2_path)
     con.execute(f"""
       COPY (
         SELECT (hash & (SELECT mask FROM _params)) AS bucket,
@@ -51,8 +54,10 @@ def main():
       (FORMAT parquet, COMPRESSION zstd, PARTITION_BY (bucket),
        ROW_GROUP_SIZE 4000000, FILE_SIZE_BYTES '250G', PER_THREAD_OUTPUT FALSE);
     """)
+    print("Export completed.")
 
     # Phase 2: counts (unchanged)
+    print("Counting hashes in each bucket...")
     a_not_b, b_not_a = con.execute("""
       WITH
       db1u AS (
@@ -80,7 +85,9 @@ def main():
       f"{out1}/bucket=*/*.parquet",
       f"{out2}/bucket=*/*.parquet",
     ]).fetchone()
+    print("Counting completed.")
 
+    print(f"A \\ B (db1 not in db2): {a_not_b}, B \\ A (db2 not in db1): {b_not_a}")
     elapsed = time.time() - t0
     report = {
         "duckdb_version": con.execute("PRAGMA version").fetchone()[0],
