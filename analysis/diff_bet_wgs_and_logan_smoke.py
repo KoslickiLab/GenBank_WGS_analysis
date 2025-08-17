@@ -107,7 +107,7 @@ def main():
     #   - FILE_SIZE_BYTES
     #   - PER_THREAD_OUTPUT
     # To produce exactly ONE file per partition in this smoke test, set threads=1.
-    con.execute("SET threads=1")
+    con.execute("SET threads=64")
     con.execute("SET partitioned_write_max_open_files=8192")  # raise OS ulimit -n too
 
     print(f"SMOKE: exporting limited rows to Parquet (db1 limit={SMOKE_LIMIT_DB1}, db2 limit={SMOKE_LIMIT_DB2})", flush=True)
