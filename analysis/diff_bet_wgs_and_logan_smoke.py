@@ -16,7 +16,7 @@ tmp  = f"{BASE}/duckdb_tmp"
 B = 9
 mask = (1 << B) - 1
 
-# Smoke limits (can override via env)
+# Smoke limits (override via env if desired)
 SMOKE_LIMIT_DB1 = int(os.getenv("SMOKE_LIMIT_DB1", "2000000"))  # 2M rows
 SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000"))
 
@@ -26,7 +26,7 @@ def dir_stats(root):
     total = 0
     files = 0
     buckets = set()
-    for p, dnames, fnames in os.walk(root):
+    for p, _, fnames in os.walk(root):
         for f in fnames:
             if f.endswith(".parquet"):
                 fp = os.path.join(p, f)
@@ -47,6 +47,13 @@ def dir_stats(root):
                         break
     return total, files, len(buckets)
 
+def print_snapshot(label, path):
+    if os.path.isdir(path):
+        total, files, nb = dir_stats(path)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label}: {files} files, {total/1e9:.3f} GB, {nb} buckets", flush=True)
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label}: (dir not created yet)", flush=True)
+
 def monitor_outputs(stop_evt, paths):
     while not stop_evt.is_set():
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -54,11 +61,18 @@ def monitor_outputs(stop_evt, paths):
         for label, path in paths.items():
             if os.path.isdir(path):
                 total, files, nb = dir_stats(path)
-                lines.append(f"  {label}: {files} files, {total/1e9:.2f} GB written, {nb} buckets present")
+                lines.append(f"  {label}: {files} files, {total/1e9:.3f} GB written, {nb} buckets present")
             else:
                 lines.append(f"  {label}: (dir not created yet)")
         print("\n".join(lines), flush=True)
         stop_evt.wait(MONITOR_INTERVAL_SEC)
+
+def ensure_any_parquet(path, label):
+    # quick sanity check after each COPY
+    total, files, nb = dir_stats(path)
+    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {label} check: files={files}, size={total/1e9:.3f} GB, buckets={nb}", flush=True)
+    if files == 0:
+        raise RuntimeError(f"No Parquet files were written to {path}. Please check permissions and DuckDB messages above.")
 
 def main():
     for d in (BASE, out1, out2, tmp):
@@ -79,6 +93,7 @@ def main():
     con.execute("PRAGMA enable_object_cache")
     con.execute("PRAGMA enable_progress_bar")
     con.execute("SET progress_bar_time=1000")       # show progress after 1s (TTY-dependent)
+    con.execute("SET memory_limit='3500GB'")
     con.execute(f"SET temp_directory='{tmp}/'")
     con.execute("SET preserve_insertion_order=false")
 
@@ -113,8 +128,10 @@ def main():
       ) TO '{out1}'
       (FORMAT parquet, COMPRESSION zstd,
        PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 250000);         -- row group sizing is allowed
+       ROW_GROUP_SIZE 250000);
     """)
+    print_snapshot("after db1 export", out1)
+    ensure_any_parquet(out1, "db1")
 
     # ---- db2 smoke export ----
     con.execute(f"""
@@ -133,20 +150,23 @@ def main():
        PARTITION_BY (bucket),
        ROW_GROUP_SIZE 250000);
     """)
+    print_snapshot("after db2 export", out2)
+    ensure_any_parquet(out2, "db2")
 
     # Restore higher parallelism for the join/counts
     con.execute("SET threads=64")
 
     print("SMOKE: counting A\\B and B\\A on smoke outputs ...", flush=True)
-    a_not_b, b_not_a = con.execute("""
+    # NOTE: inline the parquet paths to avoid parameter binding issues
+    a_not_b, b_not_a = con.execute(f"""
       WITH
       db1u AS (
         SELECT bucket, hash
-        FROM read_parquet($p1, hive_partitioning=true)
+        FROM read_parquet('{out1}/bucket=*/*.parquet', hive_partitioning=true)
       ),
       db2u AS (
         SELECT bucket, hash
-        FROM read_parquet($p2, hive_partitioning=true)
+        FROM read_parquet('{out2}/bucket=*/*.parquet', hive_partitioning=true)
       ),
       a_not_b_by_bucket AS (
         SELECT bucket, COUNT(*) AS cnt
@@ -159,12 +179,9 @@ def main():
         GROUP BY bucket
       )
       SELECT
-        (SELECT COALESCE(SUM(cnt),0) FROM a_not_b_by_bucket) AS a_not_b,
-        (SELECT COALESCE(SUM(cnt),0) FROM b_not_a_by_bucket) AS b_not_a
-    """, [
-      f"{out1}/bucket=*/*.parquet",
-      f"{out2}/bucket=*/*.parquet",
-    ]).fetchone()
+        COALESCE((SELECT SUM(cnt) FROM a_not_b_by_bucket), 0) AS a_not_b,
+        COALESCE((SELECT SUM(cnt) FROM b_not_a_by_bucket), 0) AS b_not_a
+    """).fetchone()
 
     # Stop monitor
     stop_evt.set()
@@ -191,8 +208,8 @@ def main():
             "db2": {"files": db2_files, "gb": round(db2_total/1e9, 3), "buckets": db2_buckets}
         },
         "settings": {
-            "memory_limit": con.execute("SELECT current_setting('memory_limit')").fetchone()[0],
             "threads_after_export": con.execute("SELECT current_setting('threads')").fetchone()[0],
+            "memory_limit": con.execute("SELECT current_setting('memory_limit')").fetchone()[0],
             "preserve_insertion_order": con.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0],
             "partitioned_write_max_open_files": con.execute("SELECT current_setting('partitioned_write_max_open_files')").fetchone()[0],
         }
