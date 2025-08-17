@@ -74,7 +74,7 @@ def main():
     mon.start()
 
     t0 = time.time()
-    con = duckdb.connect(config={"progress_bar_time": 1000})
+    con = duckdb.connect(config={"memory_limit": "3.5TB"})
     con.execute("PRAGMA enable_object_cache")
     con.execute("PRAGMA enable_progress_bar")
     con.execute(f"SET temp_directory='{tmp}/'")
