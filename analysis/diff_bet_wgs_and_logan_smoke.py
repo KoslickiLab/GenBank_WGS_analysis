@@ -12,13 +12,13 @@ out1 = f"{BASE}/parquet/minhash31_db1"
 out2 = f"{BASE}/parquet/minhash31_db2"
 tmp  = f"{BASE}/duckdb_tmp"
 
-# Same bucket scheme as your main run:
+# Same bucket scheme you plan to use:
 B = 9
 mask = (1 << B) - 1
 
-# Smoke limits (override via env if desired)
+# Smoke limits (can override via env)
 SMOKE_LIMIT_DB1 = int(os.getenv("SMOKE_LIMIT_DB1", "2000000"))  # 2M rows
-SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000"))  # 2M rows
+SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000"))
 
 MONITOR_INTERVAL_SEC = 30
 
@@ -42,7 +42,7 @@ def dir_stats(root):
                         try:
                             b = int(part.split("=",1)[1])
                             buckets.add(b)
-                        except:
+                        except Exception:
                             pass
                         break
     return total, files, len(buckets)
@@ -74,9 +74,11 @@ def main():
     mon.start()
 
     t0 = time.time()
-    con = duckdb.connect(config={"memory_limit": "3.5TB"})
+    con = duckdb.connect()
+    # General settings
     con.execute("PRAGMA enable_object_cache")
     con.execute("PRAGMA enable_progress_bar")
+    con.execute("SET progress_bar_time=1000")       # show progress after 1s (TTY-dependent)
     con.execute(f"SET temp_directory='{tmp}/'")
     con.execute("SET preserve_insertion_order=false")
 
@@ -84,14 +86,18 @@ def main():
     con.execute(f"ATTACH '{db2_path}' AS db2 (READ_ONLY)")
     con.execute(f"CREATE OR REPLACE TEMP TABLE _params AS SELECT {B}::INTEGER AS B, {mask}::BIGINT AS mask")
 
-    # Tame file creation during export
-    con.execute("SET threads=16")  # fewer concurrent writers per partition
-    con.execute("SET partitioned_write_max_open_files=8192")  # ensure high open-file cap (raise ulimit -n)
+    # ---- Phase 1: Exports (distinct per bucket) ----
+    # IMPORTANT: with PARTITION_BY in DuckDB 1.3.x, do NOT use:
+    #   - ROW_GROUPS_PER_FILE
+    #   - FILE_SIZE_BYTES
+    #   - PER_THREAD_OUTPUT
+    # To produce exactly ONE file per partition in this smoke test, set threads=1.
+    con.execute("SET threads=1")
+    con.execute("SET partitioned_write_max_open_files=8192")  # raise OS ulimit -n too
 
     print(f"SMOKE: exporting limited rows to Parquet (db1 limit={SMOKE_LIMIT_DB1}, db2 limit={SMOKE_LIMIT_DB2})", flush=True)
 
     # ---- db1 smoke export ----
-    # Sample a small, deterministic slice: take first N k=31 rows then bucket+dedup.
     con.execute(f"""
       COPY (
         WITH src AS (
@@ -107,8 +113,7 @@ def main():
       ) TO '{out1}'
       (FORMAT parquet, COMPRESSION zstd,
        PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 250000,          -- 250k rows/row-group (small smoke files)
-       ROW_GROUPS_PER_FILE 8);         -- ~8 RG/file → manageable sizes
+       ROW_GROUP_SIZE 250000);         -- row group sizing is allowed
     """)
 
     # ---- db2 smoke export ----
@@ -126,8 +131,7 @@ def main():
       ) TO '{out2}'
       (FORMAT parquet, COMPRESSION zstd,
        PARTITION_BY (bucket),
-       ROW_GROUP_SIZE 250000,
-       ROW_GROUPS_PER_FILE 8);
+       ROW_GROUP_SIZE 250000);
     """)
 
     # Restore higher parallelism for the join/counts
@@ -167,7 +171,7 @@ def main():
     mon.join(timeout=5)
 
     elapsed = time.time() - t0
-    # Gather a quick file count summary
+    # Quick file count summary
     db1_total, db1_files, db1_buckets = dir_stats(out1)
     db2_total, db2_files, db2_buckets = dir_stats(out2)
 
