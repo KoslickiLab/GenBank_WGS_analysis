@@ -189,10 +189,12 @@ pytest -q
 
 ## Analysis
 
-There are two main steps to the analysis:
+There are two main steps to the analysis that compares the Logan Metagenome data (ingested via: https://github.com/KoslickiLab/ingest_logan_yacht_data):
 
-1. Read all the `*.sig.zip` files and organize them into sharded parquet files (`wgs_sketch_union_ChatGPT.py`)
-2. Import this into a DuckDB database for comparison against Logan (`save_to_duckdb.py`)
+1. Read all the `*.sig.zip` files and organize them into sharded parquet files (`extract_hashes.sh`)
+2. Bucket the hashes to make uniqueness easier to compute (`make_reduced_parquets.sh`)
+3. Import this into a DuckDB database for comparison against Logan (`import_to_duckdb.sh`)
+4. Compute the set differences between GenBank WGS sketches and the Logan metagenome sketches (`python diff_bet_wgs_and_logan.py`)
 
 ---
 
