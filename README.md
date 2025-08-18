@@ -189,12 +189,12 @@ pytest -q
 
 ## Analysis
 
-There are two main steps to the analysis that compares the Logan Metagenome data (ingested via: https://github.com/KoslickiLab/ingest_logan_yacht_data):
+There are four main steps to the analysis that compares the Logan Metagenome data (ingested via: https://github.com/KoslickiLab/ingest_logan_yacht_data):
 
-1. Read all the `*.sig.zip` files and organize them into sharded parquet files (`extract_hashes.sh`)
-2. Bucket the hashes to make uniqueness easier to compute (`make_reduced_parquets.sh`)
-3. Import this into a DuckDB database for comparison against Logan (`import_to_duckdb.sh`)
-4. Compute the set differences between GenBank WGS sketches and the Logan metagenome sketches (`python diff_bet_wgs_and_logan.py`)
+1. Extract 64‑bit FracMinHash values from each `*.sig.gz` member inside the `*.sig.zip` archives and writes partitioned on‑disk (though much faster to use a RAM disc) spool files, partitioned by k‑mer size and a bucket function over the hash (`extract_hashes.sh`)
+2. Bucket the hashes to make uniqueness easier to compute: per-partition de-duplicates and writes a partitioned Parquet dataset (ZSTD compressed), one dataset per k‑mer size (`make_reduced_parquets.sh`).
+3. Import the reduced, unique Parquet datasets into a DuckDB database for comparison against Logan (`import_to_duckdb.sh`)
+4. Compute the set differences between GenBank WGS sketches and the Logan metagenome sketches (`python diff_bet_wgs_and_logan.py`). Re‑exports both sides to Parquet using a bucket function and then performs a bucket-wise anti‑join to count `A \ B` and `B \ A`, summing across buckets for totals
 
 ---
 
