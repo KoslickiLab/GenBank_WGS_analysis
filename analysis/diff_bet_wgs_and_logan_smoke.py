@@ -1,9 +1,10 @@
-# file: diff_bet_wgs_and_logan.py
+# -*- coding: utf-8 -*-
+# file: diff_bet_wgs_and_logan_smoke.py
 import duckdb, json, time, pathlib, sys, os, threading
 
-BASE = "/scratch/wgs_logan_diff"  # separate from your real run
-LOG_TXT  = f"{BASE}/minhash_diff_report.txt"
-LOG_JSON = f"{BASE}/minhash_diff_report.json"
+BASE = "/scratch/wgs_logan_diff_smoke"  # separate from your real run
+LOG_TXT  = f"{BASE}/minhash_diff_smoke_report.txt"
+LOG_JSON = f"{BASE}/minhash_diff_smoke_report.json"
 
 db1_path = "/scratch/shared_data_new/Logan_yacht_data/processed_data/database_all.db"
 db2_path = "/scratch/dmk333_new/GenBank_WGS_analysis/analysis/wgs_database.db"
@@ -14,6 +15,10 @@ tmp  = f"{BASE}/duckdb_tmp"
 # Same bucket scheme you plan to use:
 B = 9
 mask = (1 << B) - 1
+
+# Smoke limits (override via env if desired)
+SMOKE_LIMIT_DB1 = int(os.getenv("SMOKE_LIMIT_DB1", "2000000000"))
+SMOKE_LIMIT_DB2 = int(os.getenv("SMOKE_LIMIT_DB2", "2000000000"))
 
 MONITOR_INTERVAL_SEC = 30
 
@@ -52,7 +57,7 @@ def print_snapshot(label, path):
 def monitor_outputs(stop_evt, paths):
     while not stop_evt.is_set():
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        lines = [f"[{ts}] progress snapshot"]
+        lines = [f"[{ts}] smoke progress snapshot"]
         for label, path in paths.items():
             if os.path.isdir(path):
                 total, files, nb = dir_stats(path)
@@ -101,18 +106,20 @@ def main():
     #   - ROW_GROUPS_PER_FILE
     #   - FILE_SIZE_BYTES
     #   - PER_THREAD_OUTPUT
-    con.execute("SET threads=128")
+    # To produce exactly ONE file per partition in this smoke test, set threads=1.
+    con.execute("SET threads=64")
     con.execute("SET partitioned_write_max_open_files=8192")  # raise OS ulimit -n too
 
-    print(f"exporting to Parquet", flush=True)
+    print(f"SMOKE: exporting limited rows to Parquet (db1 limit={SMOKE_LIMIT_DB1}, db2 limit={SMOKE_LIMIT_DB2})", flush=True)
 
-    # ---- db1 export ----
+    # ---- db1 smoke export ----
     con.execute(f"""
       COPY (
         WITH src AS (
           SELECT min_hash
           FROM db1.sigs_dna.signature_mins
           WHERE ksize = 31
+          LIMIT {SMOKE_LIMIT_DB1}
         )
         SELECT (min_hash & (SELECT mask FROM _params)) AS bucket,
                min_hash AS hash
@@ -126,12 +133,13 @@ def main():
     print_snapshot("after db1 export", out1)
     ensure_any_parquet(out1, "db1")
 
-    # ---- db2 export ----
+    # ---- db2 smoke export ----
     con.execute(f"""
       COPY (
         WITH src AS (
           SELECT hash
           FROM db2.hashes.hashes_31
+          LIMIT {SMOKE_LIMIT_DB2}
         )
         SELECT (hash & (SELECT mask FROM _params)) AS bucket,
                hash
@@ -148,7 +156,7 @@ def main():
     # Restore higher parallelism for the join/counts
     con.execute("SET threads=64")
 
-    print("counting A\\B and B\\A on outputs ...", flush=True)
+    print("SMOKE: counting A\\B and B\\A on smoke outputs ...", flush=True)
     # NOTE: inline the parquet paths to avoid parameter binding issues
     a_not_b, b_not_a = con.execute(f"""
       WITH
@@ -185,9 +193,11 @@ def main():
     db2_total, db2_files, db2_buckets = dir_stats(out2)
 
     report = {
+        "mode": "smoke_limit",
         "duckdb_version": con.execute("PRAGMA version").fetchone()[0],
         "bucket_bits": B,
         "mask": mask,
+        "limits": {"db1": SMOKE_LIMIT_DB1, "db2": SMOKE_LIMIT_DB2},
         "a_not_b": int(a_not_b),
         "b_not_a": int(b_not_a),
         "paths": {"db1": db1_path, "db2": db2_path, "out1": out1, "out2": out2},
@@ -206,8 +216,9 @@ def main():
     }
 
     txt = (
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] \n"
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] SMOKE TEST\n"
         f"B={B} mask={mask}\n"
+        f"LIMITS: db1={SMOKE_LIMIT_DB1}, db2={SMOKE_LIMIT_DB2}\n"
         f"A\\B: {report['a_not_b']}   B\\A: {report['b_not_a']}\n"
         f"Exported files: db1={db1_files} ({report['outputs']['db1']['gb']} GB, buckets={db1_buckets}), "
         f"db2={db2_files} ({report['outputs']['db2']['gb']} GB, buckets={db2_buckets})\n"
